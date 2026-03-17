@@ -1,0 +1,13 @@
+{
+  "name": "homeguard-signaling",
+  "version": "1.0.0",
+  "description": "HomeGuard Monitor Signaling Server",
+  "main": "index.ts",
+  "scripts": {
+    "start": "bun run index.ts"
+  },
+  "dependencies": {
+    "socket.io": "^4.7.2",
+    "uuid": "^11.1.0"
+  }
+}
