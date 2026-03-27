@@ -1,77 +1,128 @@
+const { createServer } = require("http");
 const { Server } = require("socket.io");
 const { v4: uuidv4 } = require("uuid");
+
 const PORT = process.env.PORT || 8080;
-const io = new Server(Number(PORT), {
-  cors: { origin: "*", methods: ["GET", "POST"], credentials: true },
-  transports: ["websocket", "polling"],
+
+const httpServer = createServer();
+const io = new Server(httpServer, {
+  cors: {
+    origin: "*",
+    methods: ["GET", "POST"],
+    credentials: true
+  },
+  transports: ['websocket', 'polling'],
 });
+
 const devices = new Map();
 const pairingCodes = new Map();
-console.log("🚀 Signaling Server running on port " + PORT);
+
 io.on("connection", (socket) => {
-  console.log("📱 Device connected: " + socket.id);
   const deviceId = uuidv4();
+  console.log(`📱 Device connected: ${socket.id}`);
+
   socket.on("register", (data) => {
-    const device = { id: deviceId, type: data.type, name: data.name || (data.type + "-" + deviceId.slice(0,6)), socketId: socket.id };
+    const device = {
+      id: deviceId,
+      type: data.type,
+      name: data.name || `${data.type}-${deviceId.slice(0, 6)}`,
+      socketId: socket.id,
+    };
     devices.set(deviceId, device);
     socket.data.deviceId = deviceId;
+
     socket.emit("registered", { id: deviceId, name: device.name });
-    console.log("✅ " + data.type.toUpperCase() + " registered: " + device.name);
+    console.log(`✅ ${data.type.toUpperCase()} registered: ${device.name}`);
+
     if (data.type === "worker") {
       const code = generateCode();
       pairingCodes.set(code, deviceId);
-      socket.data.pairingCode = code;
-      socket.emit("pairing_code", { code: code });
-      console.log("🔗 Pairing code: " + code);
+      socket.emit("pairing_code", { code });
+      console.log(`🔗 Pairing code: ${code}`);
     }
   });
-  socket.on("pair", (data) => {
-    const code = String(data.code || "").toUpperCase().trim();
-    console.log("🔗 Pair attempt: " + code + " | Known codes: " + Array.from(pairingCodes.keys()).join(", "));
+
+  socket.on("pair_request", (data) => {
+    const code = (data.code || "").toUpperCase().trim();
+    console.log(`🔗 Pair request: ${code}, Available: [${Array.from(pairingCodes.keys()).join(', ')}]`);
+
     const workerId = pairingCodes.get(code);
-    if (!workerId) { socket.emit("pair_error", { message: "Invalid pairing code" }); return; }
+    if (!workerId) {
+      socket.emit("pair_error", { message: "Invalid pairing code" });
+      return;
+    }
+
     const worker = devices.get(workerId);
-    if (!worker) { socket.emit("pair_error", { message: "Worker not found" }); return; }
+    if (!worker) {
+      socket.emit("pair_error", { message: "Worker not found" });
+      return;
+    }
+
     const bossId = socket.data.deviceId;
     const boss = devices.get(bossId);
     if (boss) boss.pairedWith = workerId;
     worker.pairedWith = bossId;
-    socket.emit("paired", { workerId: workerId, workerName: worker.name });
-    console.log("✅ PAIRED SUCCESS!");
-    const ws = io.sockets.sockets.get(worker.socketId);
-    if (ws) ws.emit("paired", { bossId: bossId, bossName: boss ? boss.name : "boss" });
+
+    socket.emit("paired", { workerId, workerName: worker.name });
+    io.to(worker.socketId).emit("paired", { bossId, bossName: boss?.name });
+    console.log(`✅ PAIRED: ${boss?.name} <-> ${worker.name}`);
+    pairingCodes.delete(code);
   });
-  socket.on("start_stream", (data) => relay(data.targetId, "start_stream", data));
-  socket.on("stop_stream", (data) => relay(data.targetId, "stop_stream", data));
-  socket.on("offer", (data) => relay(data.targetId, "offer", data));
-  socket.on("answer", (data) => relay(data.targetId, "answer", data));
-  socket.on("ice_candidate", (data) => relay(data.targetId, "ice_candidate", data));
+
+  socket.on("start_stream", (data) => {
+    const device = devices.get(socket.data.deviceId);
+    if (device?.pairedWith) {
+      const worker = devices.get(device.pairedWith);
+      if (worker) io.to(worker.socketId).emit("start_stream", data);
+    }
+  });
+
+  socket.on("stop_stream", (data) => {
+    const device = devices.get(socket.data.deviceId);
+    if (device?.pairedWith) {
+      const worker = devices.get(device.pairedWith);
+      if (worker) io.to(worker.socketId).emit("stop_stream", data);
+    }
+  });
+
+  socket.on("offer", (data) => {
+    const target = devices.get(data.targetId);
+    if (target) io.to(target.socketId).emit("offer", { senderId: socket.data.deviceId, offer: data.offer });
+  });
+
+  socket.on("answer", (data) => {
+    const target = devices.get(data.targetId);
+    if (target) io.to(target.socketId).emit("answer", { senderId: socket.data.deviceId, answer: data.answer });
+  });
+
+  socket.on("ice_candidate", (data) => {
+    const target = devices.get(data.targetId);
+    if (target) io.to(target.socketId).emit("ice_candidate", { senderId: socket.data.deviceId, candidate: data.candidate });
+  });
+
   socket.on("disconnect", () => {
-    const devId = socket.data.deviceId;
-    const device = devices.get(devId);
+    const device = devices.get(socket.data?.deviceId);
     if (device) {
-      console.log("❌ " + (device.type || "device").toUpperCase() + " disconnected: " + device.name);
-      if (socket.data.pairingCode) pairingCodes.delete(socket.data.pairingCode);
+      console.log(`❌ ${device.type} disconnected: ${device.name}`);
       if (device.pairedWith) {
         const paired = devices.get(device.pairedWith);
         if (paired) {
-          const ps = io.sockets.sockets.get(paired.socketId);
-          if (ps) ps.emit("peer_disconnected", {});
+          io.to(paired.socketId).emit("peer_disconnected", {});
           paired.pairedWith = null;
         }
       }
-      devices.delete(devId);
+      devices.delete(socket.data.deviceId);
     }
   });
-  function relay(targetId, event, data) {
-    const target = devices.get(targetId);
-    if (target) {
-      const ts = io.sockets.sockets.get(target.socketId);
-      if (ts) ts.emit(event, data);
-    }
-  }
 });
+
 function generateCode() {
-  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-  return Array.from({ length: 6 }, () => chars[Math.floor(Math.random() * chars.length)]).join("");
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  let code = "";
+  for (let i = 0; i < 6; i++) code += chars[Math.floor(Math.random() * chars.length)];
+  return code;
 }
+
+httpServer.listen(PORT, () => {
+  console.log(`🚀 Signaling Server running on port ${PORT}`);
+});
