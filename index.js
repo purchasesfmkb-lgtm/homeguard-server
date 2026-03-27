@@ -28,7 +28,7 @@ io.on("connection", (socket) => {
     devices.set(deviceId, device);
     socket.data.deviceId = deviceId;
     socket.data.deviceType = data.type;
-    
+
     socket.emit("registered", { id: deviceId, name: device.name });
     console.log(`✅ ${data.type.toUpperCase()} registered: ${device.name}`);
 
@@ -43,36 +43,33 @@ io.on("connection", (socket) => {
 
   socket.on("pair_request", (data) => {
     const code = (data.code || "").toUpperCase().trim();
-    console.log(`🔗 Pair request with code: ${code}`);
+    console.log(`🔗 Pair request: ${code}`);
     console.log(`📋 Available codes: [${Array.from(pairingCodes.keys()).join(', ')}]`);
-    
+
     const workerId = pairingCodes.get(code);
     if (!workerId) {
-      console.log(`❌ Invalid code: ${code}`);
       socket.emit("pair_error", { message: "Invalid pairing code" });
       return;
     }
-    
+
     const worker = devices.get(workerId);
     if (!worker) {
       socket.emit("pair_error", { message: "Worker not found" });
       return;
     }
-    
+
     const bossId = socket.data.deviceId;
     const boss = devices.get(bossId);
-    
+
     if (boss) boss.pairedWith = workerId;
     worker.pairedWith = bossId;
-    
-    socket.emit("paired", { workerId, workerName: worker.name, capabilities: worker.capabilities });
-    console.log(`✅ PAIRED: Boss(${boss?.name}) <-> Worker(${worker.name})`);
-    
+
+    socket.emit("paired", { workerId, workerName: worker.name });
+    console.log(`✅ PAIRED: ${boss?.name} <-> ${worker.name}`);
+
     const workerSocket = io.sockets.sockets.get(worker.socketId);
-    if (workerSocket) {
-      workerSocket.emit("paired", { bossId, bossName: boss?.name });
-    }
-    
+    if (workerSocket) workerSocket.emit("paired", { bossId, bossName: boss?.name });
+
     pairingCodes.delete(code);
   });
 
@@ -83,7 +80,6 @@ io.on("connection", (socket) => {
       if (worker) {
         const ws = io.sockets.sockets.get(worker.socketId);
         if (ws) ws.emit("start_stream", data);
-        console.log(`🎥 START ${data.streamType}`);
       }
     }
   });
@@ -127,7 +123,7 @@ io.on("connection", (socket) => {
     const devId = socket.data?.deviceId;
     const device = devices.get(devId);
     if (device) {
-      console.log(`❌ ${device.type?.toUpperCase()} disconnected: ${device.name}`);
+      console.log(`❌ ${device.type} disconnected: ${device.name}`);
       if (socket.data.pairingCode) pairingCodes.delete(socket.data.pairingCode);
       if (device.pairedWith) {
         const paired = devices.get(device.pairedWith);
