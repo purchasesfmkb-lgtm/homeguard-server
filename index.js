@@ -1,17 +1,21 @@
+const { createServer } = require("http");
 const { Server } = require("socket.io");
 const { v4: uuidv4 } = require("uuid");
 
 const PORT = process.env.PORT || 8080;
 
-const io = new Server(Number(PORT), {
-  cors: { origin: "*", methods: ["GET", "POST"], credentials: true },
+const httpServer = createServer();
+const io = new Server(httpServer, {
+  cors: {
+    origin: "*",
+    methods: ["GET", "POST"],
+    credentials: true
+  },
   transports: ['websocket', 'polling'],
 });
 
 const devices = new Map();
 const pairingCodes = new Map();
-
-console.log(`🚀 Signaling Server running on port ${PORT}`);
 
 io.on("connection", (socket) => {
   const deviceId = uuidv4();
@@ -23,11 +27,9 @@ io.on("connection", (socket) => {
       type: data.type,
       name: data.name || `${data.type}-${deviceId.slice(0, 6)}`,
       socketId: socket.id,
-      capabilities: data.capabilities || {},
     };
     devices.set(deviceId, device);
     socket.data.deviceId = deviceId;
-    socket.data.deviceType = data.type;
 
     socket.emit("registered", { id: deviceId, name: device.name });
     console.log(`✅ ${data.type.toUpperCase()} registered: ${device.name}`);
@@ -35,16 +37,14 @@ io.on("connection", (socket) => {
     if (data.type === "worker") {
       const code = generateCode();
       pairingCodes.set(code, deviceId);
-      socket.data.pairingCode = code;
       socket.emit("pairing_code", { code });
-      console.log(`🔗 Pairing code: ${code} for ${device.name}`);
+      console.log(`🔗 Pairing code: ${code}`);
     }
   });
 
   socket.on("pair_request", (data) => {
     const code = (data.code || "").toUpperCase().trim();
-    console.log(`🔗 Pair request: ${code}`);
-    console.log(`📋 Available codes: [${Array.from(pairingCodes.keys()).join(', ')}]`);
+    console.log(`🔗 Pair request: ${code}, Available: [${Array.from(pairingCodes.keys()).join(', ')}]`);
 
     const workerId = pairingCodes.get(code);
     if (!workerId) {
@@ -60,16 +60,12 @@ io.on("connection", (socket) => {
 
     const bossId = socket.data.deviceId;
     const boss = devices.get(bossId);
-
     if (boss) boss.pairedWith = workerId;
     worker.pairedWith = bossId;
 
     socket.emit("paired", { workerId, workerName: worker.name });
+    io.to(worker.socketId).emit("paired", { bossId, bossName: boss?.name });
     console.log(`✅ PAIRED: ${boss?.name} <-> ${worker.name}`);
-
-    const workerSocket = io.sockets.sockets.get(worker.socketId);
-    if (workerSocket) workerSocket.emit("paired", { bossId, bossName: boss?.name });
-
     pairingCodes.delete(code);
   });
 
@@ -77,10 +73,7 @@ io.on("connection", (socket) => {
     const device = devices.get(socket.data.deviceId);
     if (device?.pairedWith) {
       const worker = devices.get(device.pairedWith);
-      if (worker) {
-        const ws = io.sockets.sockets.get(worker.socketId);
-        if (ws) ws.emit("start_stream", data);
-      }
+      if (worker) io.to(worker.socketId).emit("start_stream", data);
     }
   });
 
@@ -88,57 +81,48 @@ io.on("connection", (socket) => {
     const device = devices.get(socket.data.deviceId);
     if (device?.pairedWith) {
       const worker = devices.get(device.pairedWith);
-      if (worker) {
-        const ws = io.sockets.sockets.get(worker.socketId);
-        if (ws) ws.emit("stop_stream", data);
-      }
+      if (worker) io.to(worker.socketId).emit("stop_stream", data);
     }
   });
 
   socket.on("offer", (data) => {
     const target = devices.get(data.targetId);
-    if (target) {
-      const ts = io.sockets.sockets.get(target.socketId);
-      if (ts) ts.emit("offer", { senderId: socket.data.deviceId, offer: data.offer });
-    }
+    if (target) io.to(target.socketId).emit("offer", { senderId: socket.data.deviceId, offer: data.offer });
   });
 
   socket.on("answer", (data) => {
     const target = devices.get(data.targetId);
-    if (target) {
-      const ts = io.sockets.sockets.get(target.socketId);
-      if (ts) ts.emit("answer", { senderId: socket.data.deviceId, answer: data.answer });
-    }
+    if (target) io.to(target.socketId).emit("answer", { senderId: socket.data.deviceId, answer: data.answer });
   });
 
   socket.on("ice_candidate", (data) => {
     const target = devices.get(data.targetId);
-    if (target) {
-      const ts = io.sockets.sockets.get(target.socketId);
-      if (ts) ts.emit("ice_candidate", { senderId: socket.data.deviceId, candidate: data.candidate });
-    }
+    if (target) io.to(target.socketId).emit("ice_candidate", { senderId: socket.data.deviceId, candidate: data.candidate });
   });
 
   socket.on("disconnect", () => {
-    const devId = socket.data?.deviceId;
-    const device = devices.get(devId);
+    const device = devices.get(socket.data?.deviceId);
     if (device) {
       console.log(`❌ ${device.type} disconnected: ${device.name}`);
-      if (socket.data.pairingCode) pairingCodes.delete(socket.data.pairingCode);
       if (device.pairedWith) {
         const paired = devices.get(device.pairedWith);
         if (paired) {
-          const ps = io.sockets.sockets.get(paired.socketId);
-          if (ps) ps.emit("peer_disconnected", {});
+          io.to(paired.socketId).emit("peer_disconnected", {});
           paired.pairedWith = null;
         }
       }
-      devices.delete(devId);
+      devices.delete(socket.data.deviceId);
     }
   });
 });
 
 function generateCode() {
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-  return Array.from({ length: 6 }, () => chars[Math.floor(Math.random() * chars.length)]).join("");
+  let code = "";
+  for (let i = 0; i < 6; i++) code += chars[Math.floor(Math.random() * chars.length)];
+  return code;
 }
+
+httpServer.listen(PORT, () => {
+  console.log(`🚀 Signaling Server running on port ${PORT}`);
+});
