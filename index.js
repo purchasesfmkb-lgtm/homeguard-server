@@ -1,13 +1,9 @@
-const express = require('express');
-const { createServer } = require('http');
-const { Server } = require('socket.io');
-const { v4: uuidv4 } = require('uuid');
+const { Server } = require("socket.io");
+const { v4: uuidv4 } = require("uuid");
 
-const app = express();
-const httpServer = createServer(app);
 const PORT = process.env.PORT || 8080;
 
-const io = new Server(httpServer, {
+const io = new Server(Number(PORT), {
   cors: { origin: "*", methods: ["GET", "POST"], credentials: true },
   transports: ['websocket', 'polling'],
 });
@@ -16,10 +12,6 @@ const devices = new Map();
 const pairingCodes = new Map();
 
 console.log(`🚀 Signaling Server running on port ${PORT}`);
-
-// Health check
-app.get('/', (req, res) => res.json({ status: 'ok', service: 'HomeGuard' }));
-app.get('/health', (req, res) => res.json({ status: 'healthy' }));
 
 io.on("connection", (socket) => {
   const deviceId = uuidv4();
@@ -49,7 +41,6 @@ io.on("connection", (socket) => {
     }
   });
 
-  // FIXED: Listen for 'pair_request' (matches dashboard)
   socket.on("pair_request", (data) => {
     const code = (data.code || "").toUpperCase().trim();
     console.log(`🔗 Pair request with code: ${code}`);
@@ -74,21 +65,17 @@ io.on("connection", (socket) => {
     if (boss) boss.pairedWith = workerId;
     worker.pairedWith = bossId;
     
-    // Notify boss
     socket.emit("paired", { workerId, workerName: worker.name, capabilities: worker.capabilities });
     console.log(`✅ PAIRED: Boss(${boss?.name}) <-> Worker(${worker.name})`);
     
-    // Notify worker
     const workerSocket = io.sockets.sockets.get(worker.socketId);
     if (workerSocket) {
       workerSocket.emit("paired", { bossId, bossName: boss?.name });
     }
     
-    // Remove used code
     pairingCodes.delete(code);
   });
 
-  // Stream commands
   socket.on("start_stream", (data) => {
     const device = devices.get(socket.data.deviceId);
     if (device?.pairedWith) {
@@ -112,7 +99,6 @@ io.on("connection", (socket) => {
     }
   });
 
-  // WebRTC signaling
   socket.on("offer", (data) => {
     const target = devices.get(data.targetId);
     if (target) {
@@ -160,7 +146,3 @@ function generateCode() {
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
   return Array.from({ length: 6 }, () => chars[Math.floor(Math.random() * chars.length)]).join("");
 }
-
-httpServer.listen(PORT, '0.0.0.0', () => {
-  console.log(`✅ Server listening on port ${PORT}`);
-});
